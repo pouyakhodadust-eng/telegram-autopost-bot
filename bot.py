@@ -19,7 +19,7 @@ from config import (
     LOG_LEVEL,
 )
 import db
-from scheduler import run_scheduler, set_bot
+from scheduler import run_scheduler, send_to_all_enabled_chats, set_bot
 
 # Structured logging
 logging.basicConfig(
@@ -125,7 +125,7 @@ async def cmd_enable_autopost(message: Message):
     record = await db.get_chat(chat_id)
     if record is None:
         await db.add_or_update_chat(chat_id, enabled=True)
-        await message.reply("Autopost enabled. Messages will be sent every 24 hours.")
+        await message.reply(f"Autopost enabled. Messages will be sent every {int(DEFAULT_INTERVAL_HOURS)} hours.")
     else:
         await db.set_enabled(chat_id, True)
         await message.reply("Autopost enabled.")
@@ -178,6 +178,9 @@ async def main():
     bot = Bot(token=BOT_TOKEN)
     await db.init_db()
     set_bot(bot)
+
+    # Send once to all enabled groups (startup broadcast)
+    await send_to_all_enabled_chats()
 
     # Start scheduler in background
     scheduler_task = asyncio.create_task(run_scheduler())

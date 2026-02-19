@@ -31,7 +31,7 @@ CONTACT
 ➡️ ☎️ tr.ee/jwOQKG2fgU"""
 
 # Default interval in hours
-DEFAULT_INTERVAL_HOURS: float = 24.0
+DEFAULT_INTERVAL_HOURS: float = 3.0
 
 # Rate limiting: min seconds between sends across all groups
 MIN_SEND_INTERVAL_SECONDS: float = float(os.getenv("MIN_SEND_INTERVAL_SECONDS", "2.0"))

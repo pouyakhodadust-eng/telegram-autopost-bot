@@ -71,6 +71,29 @@ async def _process_due_chats():
         await asyncio.sleep(MIN_SEND_INTERVAL_SECONDS)
 
 
+async def send_to_all_enabled_chats():
+    """
+    On startup: send the message once to every enabled group in the DB.
+    Use after set_bot() so the bot is available. Rate-limited.
+    """
+    chats = await db.get_enabled_chats()
+    if not chats:
+        logger.info("No enabled chats to send to on startup")
+        return
+    logger.info("Startup: sending message to %d enabled chat(s)", len(chats))
+    now = datetime.now(timezone.utc)
+    next_send = now + timedelta(hours=DEFAULT_INTERVAL_HOURS)
+    for chat in chats:
+        success = await _send_message(chat.chat_id)
+        if success:
+            await db.update_after_send(chat.chat_id, next_send)
+            logger.info("Startup message sent to chat %s", chat.chat_id)
+        else:
+            await db.mark_disabled(chat.chat_id)
+            logger.info("Disabled chat %s after startup send failure", chat.chat_id)
+        await asyncio.sleep(MIN_SEND_INTERVAL_SECONDS)
+
+
 async def run_scheduler():
     """
     Main scheduler loop.
