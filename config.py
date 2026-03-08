@@ -26,12 +26,14 @@ CONTACT_MESSAGE: str = """MESSAGE US AT
 
 CONTACT
 
-➡️ ☎️ tr.ee/g8c3_3jgp2
+➡️ ☎️ t.me/gangster888l
 
-➡️ ☎️ tr.ee/jwOQKG2fgU"""
+➡️ ☎️ tr.ee/TMEQRwT9H-
+
+➡️ ☎️ tr.ee/KOEQO3khFm"""
 
 # Default interval in hours
-DEFAULT_INTERVAL_HOURS: float = 3.0
+DEFAULT_INTERVAL_HOURS: float = 4.0
 
 # Rate limiting: min seconds between sends across all groups
 MIN_SEND_INTERVAL_SECONDS: float = float(os.getenv("MIN_SEND_INTERVAL_SECONDS", "2.0"))

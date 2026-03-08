@@ -1,0 +1,16 @@
+[Unit]
+Description=Telegram Auto Post 2
+After=network.target
+
+[Service]
+Type=simple
+User=YOUR_USER
+WorkingDirectory=/path/to/telegram-autopost-2
+ExecStart=/path/to/venv/bin/python bot.py
+Restart=always
+RestartSec=10
+Environment=BOT_TOKEN=your_token_here
+Environment=DATABASE_URL=sqlite:////path/to/telegram-autopost-2/data/bot.db
+
+[Install]
+WantedBy=multi-user.target
