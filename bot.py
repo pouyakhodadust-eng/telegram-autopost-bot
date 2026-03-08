@@ -9,6 +9,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import ChatMemberUpdated, Message
 from aiogram.enums import ChatMemberStatus
+from aiogram.utils.token import TokenValidationError
 
 from config import (
     CONTACT_MESSAGE,
@@ -178,7 +179,16 @@ async def main():
 
     bots = []
     for i, token in enumerate(tokens):
-        b = Bot(token=token)
+        try:
+            b = Bot(token=token)
+        except TokenValidationError:
+            name = "BOT_TOKEN" if i == 0 else "BOT_TOKEN_2"
+            logger.error(
+                "%s (bot index %s) is invalid. Check .env: no quotes, no extra spaces, exact token from @BotFather.",
+                name,
+                i,
+            )
+            sys.exit(1)
         b._bot_index = i  # for scheduler and handlers
         bots.append(b)
 
