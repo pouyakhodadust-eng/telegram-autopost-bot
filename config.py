@@ -10,8 +10,15 @@ from dotenv import load_dotenv
 load_dotenv()
 from pathlib import Path
 
-# Bot token (required)
+# Bot token(s): single token or two for v2 multi-bot
 BOT_TOKEN: str = os.getenv("BOT_TOKEN", "")
+BOT_TOKEN_2: str = os.getenv("BOT_TOKEN_2", "")
+
+
+def get_bot_tokens() -> list[str]:
+    """Return list of non-empty bot tokens (1 or 2 bots)."""
+    tokens = [t.strip() for t in (BOT_TOKEN, BOT_TOKEN_2) if (t and t.strip())]
+    return tokens if tokens else ([BOT_TOKEN] if BOT_TOKEN else [])
 
 # Database: SQLite by default, PostgreSQL via DATABASE_URL
 # SQLite: sqlite:///path/to/bot.db

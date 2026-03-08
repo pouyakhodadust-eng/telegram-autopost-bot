@@ -16,26 +16,27 @@ logger = logging.getLogger(__name__)
 # Check interval: how often we look for due chats (seconds)
 POLL_INTERVAL = 60
 
-# Bot instance will be set by main
-_bot = None
+# Bot instances: list index = bot_index in DB (set by main)
+_bots: list = []
 
 
-def set_bot(bot):
-    """Set the bot instance for sending messages."""
-    global _bot
-    _bot = bot
+def set_bots(bots: list):
+    """Set the list of bot instances for sending messages (one per token)."""
+    global _bots
+    _bots = list(bots)
 
 
-async def _send_message(chat_id: int) -> bool:
+async def _send_message(chat_id: int, bot_index: int = 0) -> bool:
     """
-    Send the contact message to a chat.
+    Send the contact message to a chat using the bot at bot_index.
     Returns True on success, False on failure (e.g. bot removed, no permission).
     """
-    if _bot is None:
-        logger.error("Bot not set in scheduler")
+    if not _bots or bot_index < 0 or bot_index >= len(_bots):
+        logger.error("Bot not set in scheduler or invalid bot_index %s", bot_index)
         return False
+    bot = _bots[bot_index]
     try:
-        await _bot.send_message(
+        await bot.send_message(
             chat_id=chat_id,
             text=CONTACT_MESSAGE,
             disable_web_page_preview=True,  # No link previews
@@ -59,7 +60,8 @@ async def _process_due_chats():
     now = datetime.now(timezone.utc)
     next_send = now + timedelta(hours=DEFAULT_INTERVAL_HOURS)
     for chat in due:
-        success = await _send_message(chat.chat_id)
+        bot_index = getattr(chat, "bot_index", 0)
+        success = await _send_message(chat.chat_id, bot_index)
         if success:
             await db.update_after_send(chat.chat_id, next_send)
             logger.info("Sent to chat %s, next at %s", chat.chat_id, next_send)
@@ -84,7 +86,8 @@ async def send_to_all_enabled_chats():
     now = datetime.now(timezone.utc)
     next_send = now + timedelta(hours=DEFAULT_INTERVAL_HOURS)
     for chat in chats:
-        success = await _send_message(chat.chat_id)
+        bot_index = getattr(chat, "bot_index", 0)
+        success = await _send_message(chat.chat_id, bot_index)
         if success:
             await db.update_after_send(chat.chat_id, next_send)
             logger.info("Startup message sent to chat %s", chat.chat_id)

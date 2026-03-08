@@ -46,6 +46,7 @@ class Chat(Base):
     __tablename__ = "chats"
 
     chat_id = Column(BigInteger, primary_key=True)
+    bot_index = Column(BigInteger, default=0, nullable=False)  # which bot is in this chat (0, 1, ...)
     enabled = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     last_sent_at = Column(DateTime(timezone=True), nullable=True)
@@ -97,15 +98,24 @@ async def get_session():
 
 
 async def init_db() -> None:
-    """Create tables if they don't exist."""
+    """Create tables if they don't exist. Add bot_index column if missing (v2 multi-bot)."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Migration: add bot_index for existing DBs (ignore if already exists)
+        try:
+            if "sqlite" in DATABASE_URL:
+                await conn.execute(text("ALTER TABLE chats ADD COLUMN bot_index INTEGER DEFAULT 0 NOT NULL"))
+            else:
+                await conn.execute(text("ALTER TABLE chats ADD COLUMN IF NOT EXISTS bot_index BIGINT DEFAULT 0 NOT NULL"))
+        except Exception:
+            pass
     logger.info("Database initialized")
 
 
 async def add_or_update_chat(
     chat_id: int,
     enabled: bool = True,
+    bot_index: int = 0,
 ) -> Chat:
     """Add a new chat or update existing. Returns the Chat record."""
     now = datetime.now(timezone.utc)
@@ -115,15 +125,17 @@ async def add_or_update_chat(
         await session.execute(
             text(
                 """
-                INSERT INTO chats (chat_id, enabled, created_at, last_sent_at, next_send_at, interval_hours)
-                VALUES (:chat_id, :enabled, :created_at, NULL, :next_send_at, :interval_hours)
+                INSERT INTO chats (chat_id, bot_index, enabled, created_at, last_sent_at, next_send_at, interval_hours)
+                VALUES (:chat_id, :bot_index, :enabled, :created_at, NULL, :next_send_at, :interval_hours)
                 ON CONFLICT (chat_id) DO UPDATE SET
+                    bot_index = :bot_index,
                     enabled = :enabled,
                     next_send_at = :next_send_at
                 """
             ),
             {
                 "chat_id": chat_id,
+                "bot_index": bot_index,
                 "enabled": enabled,
                 "created_at": now,
                 "next_send_at": next_send,
