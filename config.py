@@ -4,11 +4,13 @@ Uses environment variables with sensible defaults.
 """
 
 import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
-from pathlib import Path
+# Load .env from script directory (reliable under systemd; env vars still override)
+_env_path = Path(__file__).resolve().parent / ".env"
+load_dotenv(_env_path)
 
 # Bot token(s): single token or two for v2 multi-bot (strip so .env newlines/quotes don't break)
 BOT_TOKEN: str = (os.getenv("BOT_TOKEN") or "").strip().strip('"').strip("'")

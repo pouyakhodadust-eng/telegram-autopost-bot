@@ -9,8 +9,7 @@ WorkingDirectory=/path/to/telegram-autopost-2
 ExecStart=/path/to/venv/bin/python bot.py
 Restart=always
 RestartSec=10
-Environment=BOT_TOKEN=your_token_here
-Environment=DATABASE_URL=sqlite:////path/to/telegram-autopost-2/data/bot.db
+# Do NOT set BOT_TOKEN/BOT_TOKEN_2 here - use .env in the app directory
 
 [Install]
 WantedBy=multi-user.target
