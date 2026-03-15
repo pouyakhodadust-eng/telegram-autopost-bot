@@ -34,11 +34,15 @@ CONTACT_MESSAGE: str = """MESSAGE US AT
 
 CONTACT
 
-➡️ ☎️ t.me/gangster888l
 
-➡️ ☎️ tr.ee/TMEQRwT9H-
+➡️ TELE ☎️ tr.ee/cbLi-E1uef
 
-➡️ ☎️ tr.ee/KOEQO3khFm"""
+➡️ TELE ☎️ tr.ee/KOEQO3khFm
+
+
+SIGNAL☎️ 
+
+https://signal.me/#eu/Sze4JgRLIACCBxLcExrBpY_TNahaF20VpQ5Tgi9jkks7l4E8475KvJdbotoHRUgn"""
 
 # Default interval in hours
 DEFAULT_INTERVAL_HOURS: float = 4.0
