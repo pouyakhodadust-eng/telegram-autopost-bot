@@ -3,7 +3,9 @@ Database layer for chat persistence.
 Supports SQLite (default) and PostgreSQL via DATABASE_URL.
 """
 
+import base64
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -14,6 +16,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     BigInteger,
+    Integer,
     String,
     create_engine,
     text,
@@ -28,10 +31,26 @@ logger = logging.getLogger(__name__)
 Base = declarative_base()
 
 
+CUSTOMER_BOT_TOKEN_SECRET = (os.getenv("CUSTOMER_BOT_TOKEN_SECRET") or "change-me").encode("utf-8")
+
+
+def _encrypt_token(token: str) -> str:
+    """Encrypt token with a simple XOR+base64 scheme."""
+    raw = token.encode("utf-8")
+    encrypted = bytes([b ^ CUSTOMER_BOT_TOKEN_SECRET[i % len(CUSTOMER_BOT_TOKEN_SECRET)] for i, b in enumerate(raw)])
+    return base64.urlsafe_b64encode(encrypted).decode("utf-8")
+
+
+def _decrypt_token(token_encrypted: str) -> str:
+    """Decrypt token encrypted by _encrypt_token."""
+    raw = base64.urlsafe_b64decode(token_encrypted.encode("utf-8"))
+    decrypted = bytes([b ^ CUSTOMER_BOT_TOKEN_SECRET[i % len(CUSTOMER_BOT_TOKEN_SECRET)] for i, b in enumerate(raw)])
+    return decrypted.decode("utf-8")
+
+
 def _make_async_url(url: str) -> str:
     """Convert sync DB URL to async URL for SQLAlchemy 2.0."""
     if url.startswith("sqlite"):
-        # sqlite:///path -> sqlite+aiosqlite:///path
         return url.replace("sqlite://", "sqlite+aiosqlite://", 1)
     if url.startswith("postgresql://"):
         return url.replace("postgresql://", "postgresql+asyncpg://", 1)
@@ -46,7 +65,7 @@ class Chat(Base):
     __tablename__ = "chats"
 
     chat_id = Column(BigInteger, primary_key=True)
-    bot_index = Column(BigInteger, default=0, nullable=False)  # which bot is in this chat (0, 1, ...)
+    bot_index = Column(BigInteger, default=0, nullable=False)
     enabled = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     last_sent_at = Column(DateTime(timezone=True), nullable=True)
@@ -57,6 +76,33 @@ class Chat(Base):
         return f"<Chat {self.chat_id} enabled={self.enabled}>"
 
 
+class CustomerBot(Base):
+    """Per-user bot settings for custom autopost bots."""
+
+    __tablename__ = "customer_bots"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    owner_telegram_user_id = Column(BigInteger, nullable=False, index=True)
+    bot_token_encrypted = Column(String, nullable=False)
+    bot_username = Column(String, nullable=False)
+    message_text = Column(String, nullable=False)
+    interval_hours = Column(Float, nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class BotGroup(Base):
+    """Group subscriptions for each customer bot."""
+
+    __tablename__ = "bot_groups"
+
+    customer_bot_id = Column(Integer, primary_key=True, nullable=False, index=True)
+    group_chat_id = Column(BigInteger, primary_key=True, nullable=False)
+    enabled = Column(Boolean, default=True, nullable=False)
+    last_sent_at = Column(DateTime(timezone=True), nullable=True)
+    next_send_at = Column(DateTime(timezone=True), nullable=True)
+
+
 # Ensure data directory exists for SQLite
 def _ensure_data_dir():
     url = DATABASE_URL
@@ -65,7 +111,6 @@ def _ensure_data_dir():
         Path(path).parent.mkdir(parents=True, exist_ok=True)
 
 
-# Async engine and session
 _async_url = _make_async_url(DATABASE_URL)
 _ensure_data_dir()
 
@@ -101,7 +146,6 @@ async def init_db() -> None:
     """Create tables if they don't exist. Add bot_index column if missing (v2 multi-bot)."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        # Migration: add bot_index for existing DBs (ignore if already exists)
         try:
             if "sqlite" in DATABASE_URL:
                 await conn.execute(text("ALTER TABLE chats ADD COLUMN bot_index INTEGER DEFAULT 0 NOT NULL"))
@@ -112,12 +156,99 @@ async def init_db() -> None:
     logger.info("Database initialized")
 
 
-async def add_or_update_chat(
-    chat_id: int,
-    enabled: bool = True,
-    bot_index: int = 0,
-) -> Chat:
-    """Add a new chat or update existing. Returns the Chat record."""
+async def add_customer_bot(
+    owner_telegram_user_id: int,
+    bot_token: str,
+    bot_username: str,
+    message_text: str,
+    interval_hours: float,
+) -> int:
+    now = datetime.now(timezone.utc)
+    async with get_session() as session:
+        result = await session.execute(
+            text(
+                """
+                INSERT INTO customer_bots
+                (owner_telegram_user_id, bot_token_encrypted, bot_username, message_text, interval_hours, is_active, created_at)
+                VALUES
+                (:owner_telegram_user_id, :bot_token_encrypted, :bot_username, :message_text, :interval_hours, :is_active, :created_at)
+                """
+            ),
+            {
+                "owner_telegram_user_id": owner_telegram_user_id,
+                "bot_token_encrypted": _encrypt_token(bot_token),
+                "bot_username": bot_username,
+                "message_text": message_text,
+                "interval_hours": interval_hours,
+                "is_active": True,
+                "created_at": now,
+            },
+        )
+        inserted_id = result.lastrowid
+        if inserted_id is None:
+            row = await session.execute(text("SELECT max(id) FROM customer_bots"))
+            inserted_id = row.scalar_one()
+        return int(inserted_id)
+
+
+async def get_customer_bots(owner_telegram_user_id: int) -> list[CustomerBot]:
+    async with get_session() as session:
+        result = await session.execute(
+            text("SELECT * FROM customer_bots WHERE owner_telegram_user_id = :owner_telegram_user_id ORDER BY id ASC"),
+            {"owner_telegram_user_id": owner_telegram_user_id},
+        )
+        rows = result.fetchall()
+        cols = [c.key for c in CustomerBot.__table__.columns]
+        return [CustomerBot(**dict(zip(cols, row))) for row in rows]
+
+
+async def get_customer_bot(bot_id: int, owner_telegram_user_id: int) -> CustomerBot | None:
+    async with get_session() as session:
+        result = await session.execute(
+            text(
+                "SELECT * FROM customer_bots WHERE id = :bot_id AND owner_telegram_user_id = :owner_telegram_user_id"
+            ),
+            {"bot_id": bot_id, "owner_telegram_user_id": owner_telegram_user_id},
+        )
+        row = result.fetchone()
+        if row is None:
+            return None
+        return CustomerBot(**dict(zip([c.key for c in CustomerBot.__table__.columns], row)))
+
+
+async def set_customer_bot_active(bot_id: int, owner_telegram_user_id: int, is_active: bool) -> bool:
+    async with get_session() as session:
+        result = await session.execute(
+            text(
+                """
+                UPDATE customer_bots
+                SET is_active = :is_active
+                WHERE id = :bot_id AND owner_telegram_user_id = :owner_telegram_user_id
+                """
+            ),
+            {
+                "is_active": is_active,
+                "bot_id": bot_id,
+                "owner_telegram_user_id": owner_telegram_user_id,
+            },
+        )
+        return result.rowcount > 0
+
+
+async def delete_customer_bot(bot_id: int, owner_telegram_user_id: int) -> bool:
+    async with get_session() as session:
+        await session.execute(
+            text("DELETE FROM bot_groups WHERE customer_bot_id = :bot_id"),
+            {"bot_id": bot_id},
+        )
+        result = await session.execute(
+            text("DELETE FROM customer_bots WHERE id = :bot_id AND owner_telegram_user_id = :owner_telegram_user_id"),
+            {"bot_id": bot_id, "owner_telegram_user_id": owner_telegram_user_id},
+        )
+        return result.rowcount > 0
+
+
+async def add_or_update_chat(chat_id: int, enabled: bool = True, bot_index: int = 0) -> Chat:
     now = datetime.now(timezone.utc)
     next_send = now + timedelta(hours=DEFAULT_INTERVAL_HOURS)
 
@@ -142,32 +273,22 @@ async def add_or_update_chat(
                 "interval_hours": DEFAULT_INTERVAL_HOURS,
             },
         )
-        result = await session.execute(
-            text("SELECT * FROM chats WHERE chat_id = :chat_id"),
-            {"chat_id": chat_id},
-        )
+        result = await session.execute(text("SELECT * FROM chats WHERE chat_id = :chat_id"), {"chat_id": chat_id})
         row = result.fetchone()
         return Chat(**dict(zip([c.key for c in Chat.__table__.columns], row)))
 
 
 async def get_enabled_chats() -> list[Chat]:
-    """Get all chats where autopost is enabled."""
     async with get_session() as session:
-        result = await session.execute(
-            text("SELECT * FROM chats WHERE enabled = TRUE ORDER BY next_send_at ASC")
-        )
+        result = await session.execute(text("SELECT * FROM chats WHERE enabled = TRUE ORDER BY next_send_at ASC"))
         rows = result.fetchall()
         cols = [c.key for c in Chat.__table__.columns]
         return [Chat(**dict(zip(cols, row))) for row in rows]
 
 
 async def get_chat(chat_id: int) -> Chat | None:
-    """Get a chat by ID."""
     async with get_session() as session:
-        result = await session.execute(
-            text("SELECT * FROM chats WHERE chat_id = :chat_id"),
-            {"chat_id": chat_id},
-        )
+        result = await session.execute(text("SELECT * FROM chats WHERE chat_id = :chat_id"), {"chat_id": chat_id})
         row = result.fetchone()
         if row is None:
             return None
@@ -175,28 +296,20 @@ async def get_chat(chat_id: int) -> Chat | None:
 
 
 async def set_enabled(chat_id: int, enabled: bool) -> bool:
-    """Enable or disable autopost for a chat. Returns True if chat existed."""
     async with get_session() as session:
         result = await session.execute(
-            text(
-                "UPDATE chats SET enabled = :enabled WHERE chat_id = :chat_id"
-            ),
+            text("UPDATE chats SET enabled = :enabled WHERE chat_id = :chat_id"),
             {"chat_id": chat_id, "enabled": enabled},
         )
         return result.rowcount > 0
 
 
 async def mark_disabled(chat_id: int) -> None:
-    """Mark chat as disabled (bot removed/kicked)."""
     async with get_session() as session:
-        await session.execute(
-            text("UPDATE chats SET enabled = 0 WHERE chat_id = :chat_id"),
-            {"chat_id": chat_id},
-        )
+        await session.execute(text("UPDATE chats SET enabled = 0 WHERE chat_id = :chat_id"), {"chat_id": chat_id})
 
 
 async def update_after_send(chat_id: int, next_send_at: datetime) -> None:
-    """Update last_sent_at and next_send_at after a successful send."""
     now = datetime.now(timezone.utc)
     async with get_session() as session:
         await session.execute(
@@ -212,7 +325,6 @@ async def update_after_send(chat_id: int, next_send_at: datetime) -> None:
 
 
 async def get_due_chats() -> list[Chat]:
-    """Get all enabled chats that are due for sending (next_send_at <= now)."""
     now = datetime.now(timezone.utc)
     async with get_session() as session:
         result = await session.execute(
