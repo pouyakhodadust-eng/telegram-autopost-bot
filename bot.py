@@ -7,8 +7,11 @@ import logging
 import sys
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
+from aiogram.filters.command import CommandObject
 from aiogram.types import ChatMemberUpdated, Message
 from aiogram.enums import ChatMemberStatus
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.utils.token import TokenValidationError
 
 from config import (
@@ -28,6 +31,13 @@ logging.basicConfig(
     stream=sys.stdout,
 )
 logger = logging.getLogger(__name__)
+
+
+class CreateBotFlow(StatesGroup):
+    waiting_token = State()
+    waiting_message = State()
+    waiting_interval = State()
+    waiting_confirmation = State()
 
 
 def _bot_index(bot_instance: Bot) -> int:
@@ -74,7 +84,29 @@ async def _is_chat_admin(bot_instance: Bot, chat_id: int, user_id: int) -> bool:
         return False
 
 
-# --- Handlers (registered per dispatcher for multi-bot) ---
+async def _validate_customer_bot_token(token: str) -> tuple[bool, str | None, str | None]:
+    """Validate customer bot token via getMe call."""
+    token = (token or "").strip()
+    if not token:
+        return False, None, "Token cannot be empty."
+
+    validation_bot = None
+    try:
+        validation_bot = Bot(token=token)
+        me = await validation_bot.get_me()
+        username = me.username or ""
+        return True, username, None
+    except TokenValidationError:
+        return False, None, "Invalid token format. Please paste a valid bot token from @BotFather."
+    except Exception:
+        return False, None, "Token validation failed via getMe. Make sure the token is correct and try again."
+    finally:
+        if validation_bot is not None:
+            await validation_bot.session.close()
+
+
+def _private_chat_only(message: Message) -> bool:
+    return message.chat.type == "private"
 
 
 def register_handlers(dp: Dispatcher) -> None:
@@ -113,6 +145,137 @@ def register_handlers(dp: Dispatcher) -> None:
                 await db.mark_disabled(chat_id)
             except Exception as e:
                 logger.warning("Failed to mark disabled for %s: %s", chat_id, e)
+
+    @dp.message(Command("create_bot"))
+    async def cmd_create_bot(message: Message, state: FSMContext):
+        if not _private_chat_only(message):
+            await message.reply("Use /create_bot in a private chat with me.")
+            return
+        await state.clear()
+        await state.set_state(CreateBotFlow.waiting_token)
+        await message.reply("Step 1/5: Send your bot token.")
+
+    @dp.message(CreateBotFlow.waiting_token)
+    async def flow_waiting_token(message: Message, state: FSMContext):
+        token = (message.text or "").strip()
+        ok, username, err = await _validate_customer_bot_token(token)
+        if not ok:
+            await message.reply(f"❌ {err}\nPlease send the token again.")
+            return
+
+        await state.update_data(bot_token=token, bot_username=username)
+        await state.set_state(CreateBotFlow.waiting_message)
+        await message.reply("Step 3/5: Send the message text this bot should post.")
+
+    @dp.message(CreateBotFlow.waiting_message)
+    async def flow_waiting_message(message: Message, state: FSMContext):
+        text = (message.text or "").strip()
+        if not text:
+            await message.reply("Message text cannot be empty. Send the message text.")
+            return
+
+        await state.update_data(message_text=text)
+        await state.set_state(CreateBotFlow.waiting_interval)
+        await message.reply("Step 4/5: Send interval in hours (float > 0), for example: 4 or 1.5")
+
+    @dp.message(CreateBotFlow.waiting_interval)
+    async def flow_waiting_interval(message: Message, state: FSMContext):
+        value = (message.text or "").strip().replace(",", ".")
+        try:
+            interval = float(value)
+            if interval <= 0:
+                raise ValueError
+        except ValueError:
+            await message.reply("Interval must be a positive number (float > 0). Try again.")
+            return
+
+        await state.update_data(interval_hours=interval)
+        data = await state.get_data()
+        summary = (
+            "Step 5/5: Confirm new bot configuration:\n"
+            f"• Username: @{data['bot_username']}\n"
+            f"• Message: {data['message_text']}\n"
+            f"• Interval (hours): {interval}\n\n"
+            "Reply with `yes` to save or `no` to cancel."
+        )
+        await state.set_state(CreateBotFlow.waiting_confirmation)
+        await message.reply(summary, parse_mode=None)
+
+    @dp.message(CreateBotFlow.waiting_confirmation)
+    async def flow_waiting_confirmation(message: Message, state: FSMContext):
+        reply = (message.text or "").strip().lower()
+        if reply not in {"yes", "no"}:
+            await message.reply("Please reply with `yes` or `no`.", parse_mode=None)
+            return
+
+        if reply == "no":
+            await state.clear()
+            await message.reply("Creation canceled.")
+            return
+
+        data = await state.get_data()
+        owner_id = message.from_user.id
+        created_id = await db.add_customer_bot(
+            owner_telegram_user_id=owner_id,
+            bot_token=data["bot_token"],
+            bot_username=data["bot_username"],
+            message_text=data["message_text"],
+            interval_hours=float(data["interval_hours"]),
+        )
+        await state.clear()
+        await message.reply(f"✅ Bot saved with id={created_id}.")
+
+    @dp.message(Command("my_bots"))
+    async def cmd_my_bots(message: Message):
+        if not _private_chat_only(message):
+            await message.reply("Use /my_bots in a private chat with me.")
+            return
+        bots = await db.get_customer_bots(message.from_user.id)
+        if not bots:
+            await message.reply("You don't have bots yet. Use /create_bot.")
+            return
+
+        rows = []
+        for b in bots:
+            state = "active" if b.is_active else "paused"
+            rows.append(f"#{b.id} @{b.bot_username} | every {b.interval_hours}h | {state}")
+        await message.reply("Your bots:\n" + "\n".join(rows))
+
+    @dp.message(Command("pause_bot"))
+    async def cmd_pause_bot(message: Message, command: CommandObject):
+        if not _private_chat_only(message):
+            await message.reply("Use /pause_bot in a private chat with me.")
+            return
+        arg = (command.args or "").strip()
+        if not arg.isdigit():
+            await message.reply("Usage: /pause_bot <id>")
+            return
+        ok = await db.set_customer_bot_active(int(arg), message.from_user.id, False)
+        await message.reply("Paused." if ok else "Bot not found.")
+
+    @dp.message(Command("resume_bot"))
+    async def cmd_resume_bot(message: Message, command: CommandObject):
+        if not _private_chat_only(message):
+            await message.reply("Use /resume_bot in a private chat with me.")
+            return
+        arg = (command.args or "").strip()
+        if not arg.isdigit():
+            await message.reply("Usage: /resume_bot <id>")
+            return
+        ok = await db.set_customer_bot_active(int(arg), message.from_user.id, True)
+        await message.reply("Resumed." if ok else "Bot not found.")
+
+    @dp.message(Command("delete_bot"))
+    async def cmd_delete_bot(message: Message, command: CommandObject):
+        if not _private_chat_only(message):
+            await message.reply("Use /delete_bot in a private chat with me.")
+            return
+        arg = (command.args or "").strip()
+        if not arg.isdigit():
+            await message.reply("Usage: /delete_bot <id>")
+            return
+        ok = await db.delete_customer_bot(int(arg), message.from_user.id)
+        await message.reply("Deleted." if ok else "Bot not found.")
 
     @dp.message(Command("enable_autopost"))
     async def cmd_enable_autopost(message: Message):
@@ -189,28 +352,23 @@ async def main():
                 i,
             )
             sys.exit(1)
-        b._bot_index = i  # for scheduler and handlers
+        b._bot_index = i
         bots.append(b)
 
     await db.init_db()
     set_bots(bots)
 
-    # One dispatcher per bot, same handlers
     dispatchers = [Dispatcher() for _ in bots]
     for d in dispatchers:
         register_handlers(d)
 
-    # Send once to all enabled groups (startup broadcast)
     await send_to_all_enabled_chats()
 
-    # Start scheduler in background
     scheduler_task = asyncio.create_task(run_scheduler())
 
     logger.info("Starting %s bot(s)...", len(bots))
     try:
-        await asyncio.gather(
-            *[dp.start_polling(bot) for dp, bot in zip(dispatchers, bots)]
-        )
+        await asyncio.gather(*[dp.start_polling(bot) for dp, bot in zip(dispatchers, bots)])
     finally:
         scheduler_task.cancel()
         try:
